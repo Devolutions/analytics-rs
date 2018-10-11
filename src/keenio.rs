@@ -1,3 +1,4 @@
+use chrono::{SecondsFormat, Utc};
 use curl;
 use curl::easy::{Easy, List};
 use serde_json;
@@ -65,9 +66,22 @@ impl KeenClient {
 
     pub fn add_event(&self, collection: &str, json: &serde_json::Value) -> Result<(), String> {
         if let Some(ref sender) = self.sender {
+
+            // Add a timestamp
+            let mut json_clone = json.clone();
+            if let Some(object) = json_clone.as_object_mut() {
+                let keen_info = KeenInfo {
+                    timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+                };
+                object.insert(
+                    "keen".to_string(),
+                    serde_json::to_value(&keen_info).unwrap(),
+                );
+            }
+
             let event = Event {
                 collection: collection.to_owned(),
-                json: json.clone(),
+                json: json_clone,
             };
             sender.send(event).map_err(|e| e.to_string())
         } else {
@@ -163,4 +177,9 @@ fn send_event(settings: &ProjectSettings, event: &Event) -> Result<(), curl::Err
 struct Event {
     collection: String,
     json: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize)]
+struct KeenInfo {
+    timestamp: String,
 }
