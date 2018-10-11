@@ -1,10 +1,12 @@
 extern crate analytics_rs;
+extern crate env_logger;
 extern crate sysinfo;
 #[macro_use]
-extern crate json;
-extern crate env_logger;
-#[macro_use]
 extern crate log;
+extern crate serde;
+extern crate serde_json;
+#[macro_use]
+extern crate serde_derive;
 
 use analytics_rs::keenio::KeenClient;
 use analytics_rs::keenio::ProjectSettings;
@@ -33,24 +35,32 @@ fn main() {
         }
     };
 
-    let mut client = KeenClient::new(settings, Some(Duration::from_secs(2)));
+    let mut client = KeenClient::new(settings, Some(Duration::from_secs(10)));
     client.start();
 
     let mut system = sysinfo::System::new();
 
-    for _ in 0..2 {
+    loop {
         system.refresh_all();
         let memory_used: f64 =
             system.get_used_memory() as f64 / system.get_total_memory() as f64 * 100.0;
-        let json = object!{
-            "memory_used" => memory_used,
+
+        let system_info = SystemInfo {
+            mem_used: memory_used,
         };
 
-        if let Err(e) = client.add_event("memory_usage", &json.to_string()) {
+        if let Err(e) =
+            client.add_event("memory_usage", &serde_json::to_value(&system_info).unwrap())
+        {
             error!("Event can't be added: {}", e);
         }
 
-        thread::sleep(Duration::from_millis(5000));
+        thread::sleep(Duration::from_millis(2000));
     }
     client.stop();
+}
+
+#[derive(Serialize, Deserialize)]
+struct SystemInfo {
+    mem_used: f64,
 }

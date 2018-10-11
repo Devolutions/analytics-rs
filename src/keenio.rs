@@ -1,11 +1,12 @@
 use curl;
 use curl::easy::{Easy, List};
+use serde_json;
+use std::sync::mpsc::Receiver;
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
-use std::sync::mpsc::Receiver;
 
 pub struct ProjectSettings {
     project_id: String,
@@ -62,11 +63,11 @@ impl KeenClient {
         let _ = self.thread_handle.take().unwrap().join();
     }
 
-    pub fn add_event(&self, collection: &str, json: &str) -> Result<(), String> {
+    pub fn add_event(&self, collection: &str, json: &serde_json::Value) -> Result<(), String> {
         if let Some(ref sender) = self.sender {
             let event = Event {
                 collection: collection.to_owned(),
-                data: json.to_owned(),
+                json: json.clone(),
             };
             sender.send(event).map_err(|e| e.to_string())
         } else {
@@ -75,7 +76,11 @@ impl KeenClient {
     }
 }
 
-fn send_events_thread(receiver: Receiver<Event>, settings: Arc<ProjectSettings>, send_interval: Arc<Option<Duration>>) {
+fn send_events_thread(
+    receiver: Receiver<Event>,
+    settings: Arc<ProjectSettings>,
+    send_interval: Arc<Option<Duration>>,
+) {
     let mut send_events = false;
     let mut events = Vec::new();
     let mut now = SystemTime::now();
@@ -147,7 +152,7 @@ fn send_event(settings: &ProjectSettings, event: &Event) -> Result<(), curl::Err
     easy.http_headers(list)?;
 
     // Set body
-    easy.post_fields_copy(event.data.as_ref())?;
+    easy.post_fields_copy(event.json.to_string().as_ref())?;
 
     // Send request
     easy.perform()?;
@@ -157,5 +162,5 @@ fn send_event(settings: &ProjectSettings, event: &Event) -> Result<(), curl::Err
 #[derive(Debug)]
 struct Event {
     collection: String,
-    data: String,
+    json: serde_json::Value,
 }
