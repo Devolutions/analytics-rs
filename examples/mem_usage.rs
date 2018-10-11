@@ -17,6 +17,7 @@ use sysinfo::SystemExt;
 fn main() {
     let mut builder = env_logger::Builder::new();
     builder.filter(Some("analytics_rs"), LevelFilter::Trace);
+    builder.filter(Some("mem_usage"), LevelFilter::Trace);
     builder.init();
 
     let settings = match (
@@ -32,18 +33,19 @@ fn main() {
         }
     };
 
-    let mut client = KeenClient::new(settings);
+    let mut client = KeenClient::new(settings, Some(Duration::from_secs(2)));
     client.start();
 
     let mut system = sysinfo::System::new();
 
-    loop {
+    for _ in 0..2 {
         system.refresh_all();
         let memory_used: f64 =
             system.get_used_memory() as f64 / system.get_total_memory() as f64 * 100.0;
         let json = object!{
             "memory_used" => memory_used,
         };
+
         if let Err(e) = client.add_event("memory_usage", &json.to_string()) {
             error!("Event can't be added: {}", e);
         }

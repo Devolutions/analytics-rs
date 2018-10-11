@@ -1,10 +1,11 @@
 use curl;
 use curl::easy::{Easy, List};
-use std::sync::mpsc::channel;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
+use std::time::{Duration, SystemTime};
+use std::sync::mpsc::Receiver;
 
 pub struct ProjectSettings {
     project_id: String,
@@ -24,16 +25,18 @@ impl ProjectSettings {
 
 pub struct KeenClient {
     settings: Arc<ProjectSettings>,
+    send_interval: Arc<Option<Duration>>,
     sender: Option<Sender<Event>>,
     thread_handle: Option<JoinHandle<()>>,
 }
 
 impl KeenClient {
-    pub fn new(settings: ProjectSettings) -> Self {
+    pub fn new(settings: ProjectSettings, send_interval: Option<Duration>) -> Self {
         KeenClient {
             settings: Arc::new(settings),
             sender: None,
             thread_handle: None,
+            send_interval: Arc::new(send_interval),
         }
     }
 
@@ -41,22 +44,11 @@ impl KeenClient {
         let (sender, receiver) = channel();
         self.sender = Some(sender);
 
-        let settings_t = self.settings.clone();
+        let settings = self.settings.clone();
+        let send_interval = self.send_interval.clone();
 
-        self.thread_handle = Some(thread::spawn(move || loop {
-            match receiver.recv() {
-                Ok(event) => match send_event(&settings_t, &event) {
-                    Ok(_) => {
-                        trace!("Event sent: {:?}", event);
-                    }
-                    Err(e) => {
-                        error!("The event can't be sent: {}", e);
-                    }
-                },
-                Err(_) => {
-                    break;
-                }
-            }
+        self.thread_handle = Some(thread::spawn(move || {
+            send_events_thread(receiver, settings, send_interval);
         }));
     }
 
@@ -81,6 +73,62 @@ impl KeenClient {
             Err("Thread is not running. Function \"start\" has to be called first".to_string())
         }
     }
+}
+
+fn send_events_thread(receiver: Receiver<Event>, settings: Arc<ProjectSettings>, send_interval: Arc<Option<Duration>>) {
+    let mut send_events = false;
+    let mut events = Vec::new();
+    let mut now = SystemTime::now();
+
+    loop {
+        match send_interval.as_ref() {
+            Some(interval) => {
+                // Calculate next timeout before sending events
+                let elapsed = now.elapsed().unwrap_or_else(|_| *interval);
+                let timeout = if *interval > elapsed {
+                    *interval - elapsed
+                } else {
+                    Duration::from_millis(0)
+                };
+
+                match receiver.recv_timeout(timeout) {
+                    Ok(event) => events.push(event),
+                    Err(RecvTimeoutError::Timeout) => {
+                        now = SystemTime::now();
+                        send_events = true;
+                    }
+                    Err(_) => {
+                        break;
+                    }
+                }
+            }
+            None => match receiver.recv() {
+                Ok(event) => {
+                    events.push(event);
+                    send_events = true;
+                }
+                Err(_) => break,
+            },
+        }
+
+        if send_events {
+            trace!("Sending events: {} events to send", events.len());
+            for event in &events {
+                match send_event(&settings, &event) {
+                    Ok(_) => {
+                        trace!("Event sent: {:?}", event);
+                    }
+                    Err(e) => {
+                        error!("The event can't be sent: {}", e);
+                    }
+                }
+            }
+            events.clear();
+            send_events = false;
+        }
+    }
+
+    debug!("Thread stopped: {} events not sent", events.len());
 }
 
 fn send_event(settings: &ProjectSettings, event: &Event) -> Result<(), curl::Error> {
