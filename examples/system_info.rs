@@ -50,7 +50,7 @@ fn main() {
         };
 
         if let Err(e) =
-            client.add_event("system_info", &serde_json::to_value(&system_info).unwrap())
+            client.add_event_with_geo_enrichment("system_info", &serde_json::to_value(&system_info).unwrap())
         {
             error!("Event can't be added: {}", e);
         }

@@ -65,14 +65,25 @@ impl KeenClient {
     }
 
     pub fn add_event(&self, collection: &str, json: &serde_json::Value) -> Result<(), String> {
+        self.add_event_with_param(collection, json, false)
+    }
+
+    pub fn add_event_with_geo_enrichment(&self, collection: &str, json: &serde_json::Value) -> Result<(), String> {
+        self.add_event_with_param(collection, json, true)
+    }
+
+    fn add_event_with_param(&self, collection: &str, json: &serde_json::Value, add_ip_geo: bool) -> Result<(), String> {
         if let Some(ref sender) = self.sender {
 
             // Add a timestamp
             let mut json_clone = json.clone();
             if let Some(object) = json_clone.as_object_mut() {
-                let keen_info = KeenInfo {
-                    timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-                };
+                let mut keen_info = KeenInfo::new(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true));
+                if add_ip_geo {
+                    keen_info.add_addon(KeenAddons::build_ip_geo_addons("ip_address", "ip_geo_info", true));
+                    object.insert("ip_address".to_string(), json!("${keen.ip}"));
+                }
+
                 object.insert(
                     "keen".to_string(),
                     serde_json::to_value(&keen_info).unwrap(),
@@ -88,6 +99,7 @@ impl KeenClient {
             Err("Thread is not running. Function \"start\" has to be called first".to_string())
         }
     }
+
 }
 
 fn send_events_thread(
@@ -182,4 +194,43 @@ struct Event {
 #[derive(Serialize, Deserialize)]
 struct KeenInfo {
     timestamp: String,
+    addons: Vec<KeenAddons>,
+}
+
+impl KeenInfo {
+    fn new(timestamp: String) -> Self {
+        KeenInfo {
+            timestamp,
+            addons: Vec::new(),
+        }
+    }
+
+    fn add_addon(&mut self, addon: KeenAddons) {
+        self.addons.push(addon);
+    }
+}
+#[derive(Serialize, Deserialize)]
+struct KeenAddons {
+    name: String,
+    input: KeenInput,
+    output: String,
+}
+
+impl KeenAddons {
+    fn build_ip_geo_addons(input_field_name: &str, output_field_name: &str, remove_ip_property: bool) -> Self {
+        KeenAddons {
+            name: "keen:ip_to_geo".to_string(),
+            input: KeenInput {
+                ip: input_field_name.to_string(),
+                remove_ip_property,
+            },
+            output: output_field_name.to_string(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct KeenInput {
+    ip: String,
+    remove_ip_property: bool,
 }
