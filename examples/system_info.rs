@@ -24,14 +24,13 @@ fn main() {
 
     let settings = match (
         env::var("KEEN_PROJECT_ID"),
-        env::var("KEEN_READ_KEY"),
-        env::var("KEEN_WRITE_KEY"),
+        env::var("KEEN_API_KEY"),
     ) {
-        (Ok(project_id), Ok(read_key), Ok(write_key)) => {
-            ProjectSettings::new(&project_id, &read_key, &write_key)
+        (Ok(project_id), Ok(write_key)) => {
+            ProjectSettings::new(&project_id, &write_key)
         }
         _ => {
-            panic!("KEEN_PROJECT_ID, KEEN_READ_KEY and KEEN_WRITE_KEY have to be defined as environment variable");
+            panic!("KEEN_PROJECT_ID and KEEN_API_KEY have to be defined as environment variable");
         }
     };
 
@@ -50,7 +49,7 @@ fn main() {
         };
 
         if let Err(e) =
-            client.add_event_with_geo_enrichment("system_info", &serde_json::to_value(&system_info).unwrap())
+            client.add_event("system_info", &serde_json::to_value(&system_info).unwrap())
         {
             error!("Event can't be added: {}", e);
         }

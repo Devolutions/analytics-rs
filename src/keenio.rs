@@ -11,16 +11,14 @@ use std::time::{Duration, SystemTime};
 
 pub struct ProjectSettings {
     project_id: String,
-    _read_key: String,
-    write_key: String,
+    api_key: String,
 }
 
 impl ProjectSettings {
-    pub fn new(project_id: &str, read_key: &str, write_key: &str) -> Self {
+    pub fn new(project_id: &str, api_key: &str) -> Self {
         ProjectSettings {
             project_id: project_id.to_owned(),
-            _read_key: read_key.to_owned(),
-            write_key: write_key.to_owned(),
+            api_key: api_key.to_owned(),
         }
     }
 }
@@ -167,7 +165,7 @@ fn send_event(settings: &ProjectSettings, event: &Event) -> Result<(), curl::Err
     let mut easy = Easy::new();
     let url = format!(
         "https://api.keen.io/3.0/projects/{}/events/{}?api_key={}",
-        settings.project_id, event.collection, settings.write_key
+        settings.project_id, event.collection, settings.api_key
     );
     easy.url(&url)?;
     easy.post(true)?;
