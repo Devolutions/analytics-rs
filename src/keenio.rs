@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
+use std::sync::Mutex;
 
+#[derive(Clone)]
 pub struct ProjectSettings {
     project_id: String,
     api_key: String,
@@ -23,43 +25,51 @@ impl ProjectSettings {
     }
 }
 
+#[derive(Clone)]
 pub struct KeenClient {
-    settings: Arc<ProjectSettings>,
-    send_interval: Arc<Option<Duration>>,
-    sender: Option<Sender<Event>>,
-    thread_handle: Option<JoinHandle<()>>,
+    settings: ProjectSettings,
+    send_interval: Option<Duration>,
+    // Keep the sender in a Mutex because the KeenClient struct has to be sync in DenRouter
+    sender: Arc<Mutex<Option<Sender<Event>>>>,
+    thread_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl KeenClient {
     pub fn new(settings: ProjectSettings, send_interval: Option<Duration>) -> Self {
         KeenClient {
-            settings: Arc::new(settings),
-            sender: None,
-            thread_handle: None,
-            send_interval: Arc::new(send_interval),
+            settings: settings,
+            sender: Arc::new(Mutex::new(None)),
+            thread_handle: Arc::new(Mutex::new(None)),
+            send_interval: send_interval,
         }
     }
 
     pub fn start(&mut self) {
         let (sender, receiver) = channel();
-        self.sender = Some(sender);
 
-        let settings = self.settings.clone();
-        let send_interval = self.send_interval.clone();
+        let mut sender_opt = self.sender.lock().unwrap();
+        if sender_opt.is_none() {
+            *sender_opt = Some(sender);
 
-        self.thread_handle = Some(thread::spawn(move || {
-            send_events_thread(receiver, settings, send_interval);
-        }));
+            let settings = self.settings.clone();
+            let send_interval = self.send_interval.clone();
+
+            self.thread_handle = Arc::new(Mutex::new(Some(thread::spawn(move || {
+                send_events_thread(receiver, settings, send_interval);
+            }))));
+        }
     }
 
     pub fn stop(&mut self) {
         {
             // We drop the sender. The receiver will fail and thread will close.
-            self.sender.take();
+            self.sender.lock().unwrap().take();
         }
 
         // Wait the end of the thread
-        let _ = self.thread_handle.take().unwrap().join();
+        if let Some(handle) = self.thread_handle.lock().unwrap().take(){
+            let _ = handle.join();
+        }
     }
 
     pub fn add_event(&self, collection: &str, json: &serde_json::Value) -> Result<(), String> {
@@ -71,27 +81,30 @@ impl KeenClient {
     }
 
     fn add_event_with_param(&self, collection: &str, json: &serde_json::Value, add_ip_geo: bool) -> Result<(), String> {
-        if let Some(ref sender) = self.sender {
 
-            // Add a timestamp
-            let mut json_clone = json.clone();
-            if let Some(object) = json_clone.as_object_mut() {
-                let mut keen_info = KeenInfo::new(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true));
-                if add_ip_geo {
-                    keen_info.add_addon(KeenAddons::build_ip_geo_addons("ip_address", "ip_geo_info", true));
-                    object.insert("ip_address".to_string(), json!("${keen.ip}"));
-                }
-
-                object.insert(
-                    "keen".to_string(),
-                    serde_json::to_value(&keen_info).unwrap(),
-                );
+        // Add a timestamp
+        let mut json_clone = json.clone();
+        if let Some(object) = json_clone.as_object_mut() {
+            let mut keen_info = KeenInfo::new(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true));
+            if add_ip_geo {
+                keen_info.add_addon(KeenAddons::build_ip_geo_addons("ip_address", "ip_geo_info", true));
+                object.insert("ip_address".to_string(), json!("${keen.ip}"));
             }
 
-            let event = Event {
-                collection: collection.to_owned(),
-                json: json_clone,
-            };
+            object.insert(
+                "keen".to_string(),
+                serde_json::to_value(&keen_info).unwrap(),
+            );
+        }
+
+        let event = Event {
+            collection: collection.to_owned(),
+            json: json_clone,
+        };
+
+        // Send the event
+        let sender = self.sender.lock().unwrap();
+        if let Some(ref sender) = *sender {
             sender.send(event).map_err(|e| e.to_string())
         } else {
             Err("Thread is not running. Function \"start\" has to be called first".to_string())
@@ -102,8 +115,8 @@ impl KeenClient {
 
 fn send_events_thread(
     receiver: Receiver<Event>,
-    settings: Arc<ProjectSettings>,
-    send_interval: Arc<Option<Duration>>,
+    settings: ProjectSettings,
+    send_interval: Option<Duration>,
 ) {
     let mut send_events = false;
     let mut events = Vec::new();
