@@ -2,13 +2,16 @@ use chrono::{SecondsFormat, Utc};
 use curl;
 use curl::easy::{Easy, List};
 use serde_json;
+use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
-use std::sync::Mutex;
+
+const MAX_EVENTS_BY_REQUEST: u32 = 5000;
 
 #[derive(Clone)]
 pub struct ProjectSettings {
@@ -67,7 +70,7 @@ impl KeenClient {
         }
 
         // Wait the end of the thread
-        if let Some(handle) = self.thread_handle.lock().unwrap().take(){
+        if let Some(handle) = self.thread_handle.lock().unwrap().take() {
             let _ = handle.join();
         }
     }
@@ -76,18 +79,31 @@ impl KeenClient {
         self.add_event_with_param(collection, json, false)
     }
 
-    pub fn add_event_with_geo_enrichment(&self, collection: &str, json: &serde_json::Value) -> Result<(), String> {
+    pub fn add_event_with_geo_enrichment(
+        &self,
+        collection: &str,
+        json: &serde_json::Value,
+    ) -> Result<(), String> {
         self.add_event_with_param(collection, json, true)
     }
 
-    fn add_event_with_param(&self, collection: &str, json: &serde_json::Value, add_ip_geo: bool) -> Result<(), String> {
-
+    fn add_event_with_param(
+        &self,
+        collection: &str,
+        json: &serde_json::Value,
+        add_ip_geo: bool,
+    ) -> Result<(), String> {
         // Add a timestamp
         let mut json_clone = json.clone();
         if let Some(object) = json_clone.as_object_mut() {
-            let mut keen_info = KeenInfo::new(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true));
+            let mut keen_info =
+                KeenInfo::new(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true));
             if add_ip_geo {
-                keen_info.add_addon(KeenAddons::build_ip_geo_addons("ip_address", "ip_geo_info", true));
+                keen_info.add_addon(KeenAddons::build_ip_geo_addons(
+                    "ip_address",
+                    "ip_geo_info",
+                    true,
+                ));
                 object.insert("ip_address".to_string(), json!("${keen.ip}"));
             }
 
@@ -110,7 +126,6 @@ impl KeenClient {
             Err("Thread is not running. Function \"start\" has to be called first".to_string())
         }
     }
-
 }
 
 fn send_events_thread(
@@ -119,7 +134,8 @@ fn send_events_thread(
     send_interval: Option<Duration>,
 ) {
     let mut send_events = false;
-    let mut events = Vec::new();
+    let mut events_qty = 0u32;
+    let mut events = HashMap::new();
     let mut now = SystemTime::now();
 
     loop {
@@ -134,7 +150,11 @@ fn send_events_thread(
                 };
 
                 match receiver.recv_timeout(timeout) {
-                    Ok(event) => events.push(event),
+                    Ok(event) => {
+                        events_qty += 1;
+                        let collection = events.entry(event.collection).or_insert(Vec::new());
+                        collection.push(event.json);
+                    }
                     Err(RecvTimeoutError::Timeout) => {
                         now = SystemTime::now();
                         send_events = true;
@@ -146,39 +166,42 @@ fn send_events_thread(
             }
             None => match receiver.recv() {
                 Ok(event) => {
-                    events.push(event);
+                    let collection = events.entry(event.collection).or_insert(Vec::new());
+                    collection.push(event.json);
                     send_events = true;
                 }
                 Err(_) => break,
             },
         }
 
-        if send_events {
-            trace!("Sending events: {} events to send", events.len());
-            for event in &events {
-                match send_event(&settings, &event) {
+        if send_events || events_qty >= MAX_EVENTS_BY_REQUEST {
+            if !events.is_empty() {
+                trace!("Sending events: {} events to send!", events_qty);
+                let body = serde_json::to_string(&events).unwrap();
+                match post_to_keen(&settings, &body) {
                     Ok(_) => {
-                        trace!("Event sent: {:?}", event);
+                        trace!("Events sent: {}", body);
                     }
                     Err(e) => {
-                        error!("The event can't be sent: {}", e);
+                        error!("Events can't be sent: {}", e);
                     }
                 }
+                events.clear();
             }
-            events.clear();
             send_events = false;
+            events_qty = 0;
         }
     }
 
     debug!("Thread stopped: {} events not sent", events.len());
 }
 
-fn send_event(settings: &ProjectSettings, event: &Event) -> Result<(), curl::Error> {
+fn post_to_keen(settings: &ProjectSettings, body: &str) -> Result<(), curl::Error> {
     // Prepare curl request
     let mut easy = Easy::new();
     let url = format!(
-        "https://api.keen.io/3.0/projects/{}/events/{}?api_key={}",
-        settings.project_id, event.collection, settings.api_key
+        "https://api.keen.io/3.0/projects/{}/events?api_key={}",
+        settings.project_id, settings.api_key
     );
     easy.url(&url)?;
     easy.post(true)?;
@@ -189,7 +212,7 @@ fn send_event(settings: &ProjectSettings, event: &Event) -> Result<(), curl::Err
     easy.http_headers(list)?;
 
     // Set body
-    easy.post_fields_copy(event.json.to_string().as_ref())?;
+    easy.post_fields_copy(body.as_ref())?;
 
     // Send request
     easy.perform()?;
@@ -228,7 +251,11 @@ struct KeenAddons {
 }
 
 impl KeenAddons {
-    fn build_ip_geo_addons(input_field_name: &str, output_field_name: &str, remove_ip_property: bool) -> Self {
+    fn build_ip_geo_addons(
+        input_field_name: &str,
+        output_field_name: &str,
+        remove_ip_property: bool,
+    ) -> Self {
         KeenAddons {
             name: "keen:ip_to_geo".to_string(),
             input: KeenInput {
