@@ -23,6 +23,12 @@ pub extern "C" fn Keen_New(c_project_key: *const c_char, c_api_key: *const c_cha
 }
 
 #[no_mangle]
+pub extern "C" fn Keen_Free(keen_handle: *mut KeenClient) {
+    // Will be deleted when the keen will go out of scope
+    let _keen = unsafe { Box::from_raw(keen_handle) };
+}
+
+#[no_mangle]
 pub extern "C" fn Keen_Start(keen_handle: *mut KeenClient) {
     let keen = unsafe { &mut *keen_handle };
     keen.start();
