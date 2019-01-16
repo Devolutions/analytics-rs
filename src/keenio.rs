@@ -199,6 +199,8 @@ fn send_events_thread(
 fn post_to_keen(settings: &ProjectSettings, body: &str) -> Result<(), curl::Error> {
     // Prepare curl request
     let mut easy = Easy::new();
+    let _ = easy.ssl_verify_host(false);
+    let _ = easy.ssl_verify_peer(false);
     let url = format!(
         "https://api.keen.io/3.0/projects/{}/events?api_key={}",
         settings.project_id, settings.api_key
