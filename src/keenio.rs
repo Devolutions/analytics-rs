@@ -15,13 +15,15 @@ const MAX_EVENTS_BY_REQUEST: u32 = 5000;
 
 #[derive(Clone)]
 pub struct ProjectSettings {
+    custom_domain_url: Option<String>,
     project_id: String,
     api_key: String,
 }
 
 impl ProjectSettings {
-    pub fn new(project_id: &str, api_key: &str) -> Self {
+    pub fn new(custom_domain_url: Option<String>, project_id: &str, api_key: &str) -> Self {
         ProjectSettings {
+            custom_domain_url,
             project_id: project_id.to_owned(),
             api_key: api_key.to_owned(),
         }
@@ -136,6 +138,7 @@ fn send_events_thread(
     let mut send_events = false;
     let mut events_qty = 0u32;
     let mut events = HashMap::new();
+    let mut stop_thread = false;
     let mut now = SystemTime::now();
 
     loop {
@@ -160,7 +163,7 @@ fn send_events_thread(
                         send_events = true;
                     }
                     Err(_) => {
-                        break;
+                        stop_thread = true;
                     }
                 }
             }
@@ -170,11 +173,13 @@ fn send_events_thread(
                     collection.push(event.json);
                     send_events = true;
                 }
-                Err(_) => break,
+                Err(_) => {
+                    stop_thread = true;
+                },
             },
         }
 
-        if send_events || events_qty >= MAX_EVENTS_BY_REQUEST {
+        if send_events || events_qty >= MAX_EVENTS_BY_REQUEST || stop_thread {
             if !events.is_empty() {
                 trace!("Sending events: {} events to send!", events_qty);
                 let body = serde_json::to_string(&events).unwrap();
@@ -191,9 +196,11 @@ fn send_events_thread(
             send_events = false;
             events_qty = 0;
         }
-    }
 
-    debug!("Thread stopped: {} events not sent", events.len());
+        if stop_thread {
+            break;
+        }
+    }
 }
 
 fn post_to_keen(settings: &ProjectSettings, body: &str) -> Result<(), curl::Error> {
@@ -206,9 +213,9 @@ fn post_to_keen(settings: &ProjectSettings, body: &str) -> Result<(), curl::Erro
     let _ = easy.ssl_verify_peer(false);
 
 
+    let domain_url = settings.custom_domain_url.as_ref().map_or("https://api.keen.io".to_string(), |url| url.to_string());
     let url = format!(
-        "https://api.keen.io/3.0/projects/{}/events?api_key={}",
-        settings.project_id, settings.api_key
+        "{}/3.0/projects/{}/events?api_key={}", domain_url, settings.project_id, settings.api_key
     );
     easy.url(&url)?;
     easy.post(true)?;

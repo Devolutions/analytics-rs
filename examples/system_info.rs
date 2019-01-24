@@ -23,7 +23,7 @@ fn main() {
     builder.init();
 
     let settings = match (env::var("KEEN_PROJECT_ID"), env::var("KEEN_API_KEY")) {
-        (Ok(project_id), Ok(write_key)) => ProjectSettings::new(&project_id, &write_key),
+        (Ok(project_id), Ok(write_key)) => ProjectSettings::new(None, &project_id, &write_key),
         _ => {
             panic!("KEEN_PROJECT_ID and KEEN_API_KEY have to be defined as environment variable");
         }
