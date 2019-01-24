@@ -1,9 +1,18 @@
 use std::ffi::CStr;
-use std::os::raw::{c_int, c_char};
+use std::os::raw::{c_int, c_char, c_ulonglong};
 use keenio::{KeenClient, ProjectSettings};
+use std::time::Duration;
+use std::ptr;
 
 #[no_mangle]
-pub extern "C" fn Keen_New(c_project_key: *const c_char, c_api_key: *const c_char) -> *mut KeenClient {
+pub extern "C" fn Keen_New(c_custom_domain_url: *const c_char, c_project_key: *const c_char, c_api_key: *const c_char, send_interval: c_ulonglong) -> *mut KeenClient {
+
+    let custom_domain_url_opt = if c_custom_domain_url != ptr::null() {
+        unsafe {CStr::from_ptr(c_custom_domain_url).to_str().ok()}
+    }
+    else {
+        None
+    };
 
     let project_key_opt = unsafe {
         CStr::from_ptr(c_project_key).to_str().ok()
@@ -14,8 +23,8 @@ pub extern "C" fn Keen_New(c_project_key: *const c_char, c_api_key: *const c_cha
     };
 
     if let (Some(project_key), Some(api_key)) = (project_key_opt, api_key_opt) {
-        let setting = ProjectSettings::new(project_key, api_key);
-        Box::into_raw(Box::new(KeenClient::new(setting, None))) as *mut KeenClient
+        let setting = ProjectSettings::new(custom_domain_url_opt.map_or(None, |domain_name| Some(domain_name.to_string())), project_key, api_key);
+        Box::into_raw(Box::new(KeenClient::new(setting, Some(Duration::from_millis(send_interval))))) as *mut KeenClient
     }
     else {
         0 as *mut KeenClient
