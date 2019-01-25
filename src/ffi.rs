@@ -50,6 +50,18 @@ pub extern "C" fn Keen_Stop(keen_handle: *mut KeenClient) {
 }
 
 #[no_mangle]
+pub extern "C" fn Keen_Flush(keen_handle: *mut KeenClient, wait: c_int) -> c_int {
+    let keen = unsafe { &mut *keen_handle };
+    let wait_flush = wait != 0;
+    if keen.flush(wait_flush).is_ok() {
+        1
+    }
+    else {
+        -1
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn Keen_AddEvent(keen_handle: *mut KeenClient, c_collection: *const c_char, c_event: *const c_char) -> c_int {
     let keen = unsafe { &mut *keen_handle };
 
