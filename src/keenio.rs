@@ -34,8 +34,9 @@ impl ProjectSettings {
 pub struct KeenClient {
     settings: ProjectSettings,
     send_interval: Option<Duration>,
-    // Keep the sender in a Mutex because the KeenClient struct has to be sync in DenRouter
-    sender: Arc<Mutex<Option<Sender<Event>>>>,
+    // Keep the sender/receiver in a Mutex because the KeenClient struct has to be sync in DenRouter
+    sender: Arc<Mutex<Option<Sender<Event>>>>,          // Use to send events to the thread
+    receiver_sync: Arc<Mutex<Option<Receiver<()>>>>,    // Use to wait the end of a task in the thread
     thread_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
@@ -44,23 +45,27 @@ impl KeenClient {
         KeenClient {
             settings: settings,
             sender: Arc::new(Mutex::new(None)),
+            receiver_sync: Arc::new(Mutex::new(None)),
             thread_handle: Arc::new(Mutex::new(None)),
             send_interval: send_interval,
         }
     }
 
     pub fn start(&mut self) {
-        let (sender, receiver) = channel();
+        let (sender_event, receiver_event) = channel();
+        let (sender_sync, receiver_sync) = channel();
 
-        let mut sender_opt = self.sender.lock().unwrap();
-        if sender_opt.is_none() {
-            *sender_opt = Some(sender);
+        let mut sender_event_opt = self.sender.lock().unwrap();
+        let mut receiver_sync_opt = self.receiver_sync.lock().unwrap();
+        if sender_event_opt.is_none() && receiver_sync_opt.is_none() {
+            *sender_event_opt = Some(sender_event);
+            *receiver_sync_opt = Some(receiver_sync);
 
             let settings = self.settings.clone();
             let send_interval = self.send_interval.clone();
 
             self.thread_handle = Arc::new(Mutex::new(Some(thread::spawn(move || {
-                send_events_thread(receiver, settings, send_interval);
+                send_events_thread(receiver_event, sender_sync, settings, send_interval);
             }))));
         }
     }
@@ -74,6 +79,24 @@ impl KeenClient {
         // Wait the end of the thread
         if let Some(handle) = self.thread_handle.lock().unwrap().take() {
             let _ = handle.join();
+        }
+    }
+
+    pub fn flush(&mut self, wait: bool) -> Result<(), String> {
+        // Send the event FLUSH
+        let sender = self.sender.lock().unwrap();
+
+        if let Some(ref sender) = *sender {
+            sender.send(Event::Flush(wait)).map_err(|e| e.to_string())?;
+            if wait {
+                let receiver_sync_opt = self.receiver_sync.lock().unwrap();
+                if let Some(ref receiver_sync) = *receiver_sync_opt {
+                    receiver_sync.recv().map_err(|e| e.to_string())?;
+                }
+            }
+            Ok(())
+        } else {
+            Err("Thread is not running. Function \"start\" has to be called first".to_string())
         }
     }
 
@@ -115,10 +138,7 @@ impl KeenClient {
             );
         }
 
-        let event = Event {
-            collection: collection.to_owned(),
-            json: json_clone,
-        };
+        let event = Event::KeenEvent(collection.to_owned(), json_clone);
 
         // Send the event
         let sender = self.sender.lock().unwrap();
@@ -132,10 +152,12 @@ impl KeenClient {
 
 fn send_events_thread(
     receiver: Receiver<Event>,
+    sender_sync: Sender<()>,
     settings: ProjectSettings,
     send_interval: Option<Duration>,
 ) {
     let mut send_events = false;
+    let mut notify_caller = false;
     let mut events_qty = 0u32;
     let mut events = HashMap::new();
     let mut stop_thread = false;
@@ -153,13 +175,16 @@ fn send_events_thread(
                 };
 
                 match receiver.recv_timeout(timeout) {
-                    Ok(event) => {
+                    Ok(Event::KeenEvent(collection, json)) => {
                         events_qty += 1;
-                        let collection = events.entry(event.collection).or_insert(Vec::new());
-                        collection.push(event.json);
+                        let collection = events.entry(collection).or_insert(Vec::new());
+                        collection.push(json);
+                    }
+                    Ok(Event::Flush(notify)) => {
+                        send_events = true;
+                        notify_caller = notify;
                     }
                     Err(RecvTimeoutError::Timeout) => {
-                        now = SystemTime::now();
                         send_events = true;
                     }
                     Err(_) => {
@@ -168,10 +193,14 @@ fn send_events_thread(
                 }
             }
             None => match receiver.recv() {
-                Ok(event) => {
-                    let collection = events.entry(event.collection).or_insert(Vec::new());
-                    collection.push(event.json);
+                Ok(Event::KeenEvent(collection, json)) => {
+                    let collection = events.entry(collection).or_insert(Vec::new());
+                    collection.push(json);
                     send_events = true;
+                }
+                Ok(Event::Flush(notify)) => {
+                    send_events = true;
+                    notify_caller = notify;
                 }
                 Err(_) => {
                     stop_thread = true;
@@ -180,6 +209,7 @@ fn send_events_thread(
         }
 
         if send_events || events_qty >= MAX_EVENTS_BY_REQUEST || stop_thread {
+            now = SystemTime::now();
             if !events.is_empty() {
                 trace!("Sending events: {} events to send!", events_qty);
                 let body = serde_json::to_string(&events).unwrap();
@@ -195,6 +225,11 @@ fn send_events_thread(
             }
             send_events = false;
             events_qty = 0;
+        }
+
+        // Notify the caller that the flush is done
+        if notify_caller {
+            let _ = sender_sync.send(());
         }
 
         if stop_thread {
@@ -234,9 +269,9 @@ fn post_to_keen(settings: &ProjectSettings, body: &str) -> Result<(), curl::Erro
 }
 
 #[derive(Debug)]
-struct Event {
-    collection: String,
-    json: serde_json::Value,
+enum Event {
+    KeenEvent(String, serde_json::Value),
+    Flush(bool),
 }
 
 #[derive(Serialize, Deserialize)]
