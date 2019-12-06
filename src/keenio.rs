@@ -3,6 +3,7 @@ use curl;
 use curl::easy::{Easy, List};
 use serde_json;
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::Arc;
@@ -12,6 +13,29 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
 const MAX_EVENTS_BY_REQUEST: u32 = 5000;
+
+#[derive(Debug)]
+pub enum Error {
+    Io(String),
+    Network(curl::Error),
+    NotStarted,
+}
+
+impl From<curl::Error> for Error {
+    fn from(error: curl::Error) -> Error {
+        Error::Network(error)
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Error::Io(s) => write!(f, "{}", s),
+            Error::Network(e) => write!(f, "{}", e),
+            Error::NotStarted => write!(f, "Thread is not running. Function \"start\" has to be called first"),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct ProjectSettings {
@@ -82,25 +106,25 @@ impl KeenClient {
         }
     }
 
-    pub fn flush(&mut self, wait: bool) -> Result<(), String> {
+    pub fn flush(&mut self, wait: bool) -> Result<(), Error> {
         // Send the event FLUSH
         let sender = self.sender.lock().unwrap();
 
         if let Some(ref sender) = *sender {
-            sender.send(Event::Flush(wait)).map_err(|e| e.to_string())?;
+            sender.send(Event::Flush(wait)).map_err(|e| Error::Io(e.to_string()))?;
             if wait {
                 let receiver_sync_opt = self.receiver_sync.lock().unwrap();
                 if let Some(ref receiver_sync) = *receiver_sync_opt {
-                    receiver_sync.recv().map_err(|e| e.to_string())?;
+                    receiver_sync.recv().map_err(|e| Error::Io(e.to_string()))?;
                 }
             }
             Ok(())
         } else {
-            Err("Thread is not running. Function \"start\" has to be called first".to_string())
+            Err(Error::NotStarted)
         }
     }
 
-    pub fn add_event(&self, collection: &str, json: &serde_json::Value) -> Result<(), String> {
+    pub fn add_event(&self, collection: &str, json: &serde_json::Value) -> Result<(), Error> {
         self.add_event_with_param(collection, json, false)
     }
 
@@ -108,7 +132,7 @@ impl KeenClient {
         &self,
         collection: &str,
         json: &serde_json::Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         self.add_event_with_param(collection, json, true)
     }
 
@@ -117,7 +141,7 @@ impl KeenClient {
         collection: &str,
         json: &serde_json::Value,
         add_ip_geo: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         // Add a timestamp
         let mut json_clone = json.clone();
         if let Some(object) = json_clone.as_object_mut() {
@@ -143,9 +167,9 @@ impl KeenClient {
         // Send the event
         let sender = self.sender.lock().unwrap();
         if let Some(ref sender) = *sender {
-            sender.send(event).map_err(|e| e.to_string())
+            sender.send(event).map_err(|e| Error::Io(e.to_string()))
         } else {
-            Err("Thread is not running. Function \"start\" has to be called first".to_string())
+            Err(Error::NotStarted)
         }
     }
 }
@@ -216,10 +240,13 @@ fn send_events_thread(
                 match post_to_keen(&settings, &body) {
                     Ok(_) => {
                         trace!("Events sent: {}", body);
-                    }
+                    },
+                    Err(Error::NotStarted) => {
+                        trace!("Events can't be sent: {}", Error::NotStarted);
+                    },
                     Err(e) => {
                         error!("Events can't be sent: {}", e);
-                    }
+                    },
                 }
                 events.clear();
             }
@@ -238,7 +265,7 @@ fn send_events_thread(
     }
 }
 
-fn post_to_keen(settings: &ProjectSettings, body: &str) -> Result<(), curl::Error> {
+fn post_to_keen(settings: &ProjectSettings, body: &str) -> Result<(), Error> {
     // Prepare curl request
     let mut easy = Easy::new();
 
@@ -246,7 +273,6 @@ fn post_to_keen(settings: &ProjectSettings, body: &str) -> Result<(), curl::Erro
     // and installed certificates are not provided to mbedtls (wayk windows has that problem).
     let _ = easy.ssl_verify_host(false);
     let _ = easy.ssl_verify_peer(false);
-
 
     let domain_url = settings.custom_domain_url.as_ref().map_or("https://api.keen.io".to_string(), |url| url.to_string());
     let url = format!(
