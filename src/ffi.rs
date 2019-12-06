@@ -1,6 +1,6 @@
 use std::ffi::CStr;
 use std::os::raw::{c_int, c_char, c_ulonglong};
-use keenio::{KeenClient, ProjectSettings};
+use keenio::{Error, KeenClient, ProjectSettings};
 use std::time::Duration;
 use std::ptr;
 
@@ -78,6 +78,10 @@ pub extern "C" fn Keen_AddEvent(keen_handle: *mut KeenClient, c_collection: *con
             Ok(json_event) => {
                 match keen.add_event(collection, &json_event) {
                     Ok(_) => return 1,
+                    Err(Error::NotStarted) => {
+                        trace!("Events can't be sent: {}", Error::NotStarted);
+                        return -1;
+                    },
                     Err(e) => {
                         error!("Event can't be added: {}", e);
                         return -1;
